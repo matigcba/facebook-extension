@@ -1,12 +1,12 @@
-// ===== BACKGROUND.JS CORREGIDO PARA SERVICE WORKER =====
-console.log('🚀 Facebook Comment Tool - Background Script iniciado');
+// ===== BACKGROUND.JS SIN WEBSOCKET - POLLING HTTP =====
+console.log('🚀 Facebook Comment Tool - Background Script iniciado (HTTP)');
 
 class FacebookCommentExtension {
   constructor() {
-    this.socket = null;
     this.isConnected = false;
-    this.serverUrl = 'wss://api.gestorfb.pt';
-    this.reconnectInterval = 5000;
+    this.apiUrl = 'https://api.gestorfb.pt/api'; // Tu API REST
+    this.pollingInterval = 2000; // Consultar cada 2 segundos
+    this.pollingTimer = null;
     this.facebookTabs = new Map();
     
     this.init();
@@ -14,9 +14,10 @@ class FacebookCommentExtension {
 
   async init() {
     console.log('🔧 Inicializando extensão...');
+    console.log(`🔗 API configurada: ${this.apiUrl}`);
     
-    // Conectar ao servidor
-    this.connectToServer();
+    // Iniciar polling
+    this.startPolling();
     
     // Configurar listeners
     this.setupTabListeners();
@@ -26,79 +27,83 @@ class FacebookCommentExtension {
     await this.checkExistingFacebookTabs();
   }
 
-  connectToServer() {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      return;
-    }
-
-    console.log('🔗 Conectando ao servidor...');
+  // ===== POLLING PARA COMANDOS =====
+  startPolling() {
+    console.log('🔄 Iniciando polling para comandos...');
     
-    try {
-      this.socket = new WebSocket(this.serverUrl);
-      
-      this.socket.onopen = () => {
-        console.log('✅ Conectado ao servidor');
-        this.isConnected = true;
-        
-        this.socket.send(JSON.stringify({
-          type: 'extension_connect',
-          version: '1.0.0',
-          timestamp: Date.now()
-        }));
-        
-        this.updateIcon('connected');
-      };
-      
-      this.socket.onmessage = (event) => {
-        this.handleServerMessage(event.data);
-      };
-      
-      this.socket.onclose = () => {
-        console.log('🔌 Desconectado do servidor');
-        this.isConnected = false;
-        this.updateIcon('disconnected');
-        
-        setTimeout(() => {
-          this.connectToServer();
-        }, this.reconnectInterval);
-      };
-      
-      this.socket.onerror = (error) => {
-        console.error('❌ Erro WebSocket:', error);
-        this.updateIcon('error');
-      };
-      
-    } catch (error) {
-      console.error('❌ Erro conectando:', error);
-      setTimeout(() => {
-        this.connectToServer();
-      }, this.reconnectInterval);
+    this.pollingTimer = setInterval(async () => {
+      try {
+        await this.checkForCommands();
+      } catch (error) {
+        console.error('❌ Erro no polling:', error);
+      }
+    }, this.pollingInterval);
+  }
+
+  stopPolling() {
+    if (this.pollingTimer) {
+      clearInterval(this.pollingTimer);
+      this.pollingTimer = null;
+      console.log('⏹️ Polling parado');
     }
   }
 
-  async handleServerMessage(data) {
+  async checkForCommands() {
     try {
-      const message = JSON.parse(data);
-      console.log('📨 Comando recebido:', message);
+      const response = await fetch(`${this.apiUrl}/extension/next-command`);
       
-      const { id, action, data: commandData } = message;
-      let result = { success: false, error: 'Comando não implementado' };
+      if (!response.ok) {
+        if (!this.isConnected) {
+          console.log('🔌 API não acessível');
+        }
+        this.isConnected = false;
+        this.updateIcon('disconnected');
+        return;
+      }
+
+      // Primeira conexão bem-sucedida
+      if (!this.isConnected) {
+        console.log('✅ Conectado à API');
+        this.isConnected = true;
+        this.updateIcon('connected');
+      }
+
+      const data = await response.json();
       
+      if (data.hasCommand) {
+        console.log(`📨 Comando recebido: ${data.command.action}`);
+        await this.executeCommand(data.command);
+      }
+
+    } catch (error) {
+      if (this.isConnected) {
+        console.log('🔌 Perdeu conexão com API');
+        this.isConnected = false;
+        this.updateIcon('disconnected');
+      }
+    }
+  }
+
+  async executeCommand(command) {
+    const { id, action, data } = command;
+    let result = { success: false, error: 'Comando não implementado' };
+
+    try {
       switch (action) {
         case 'open_facebook':
           result = await this.openFacebook();
           break;
         case 'login_facebook':
-          result = await this.loginFacebook(commandData);
+          result = await this.loginFacebook(data);
           break;
         case 'navigate_to':
-          result = await this.navigateTo(commandData);
+          result = await this.navigateTo(data);
           break;
         case 'comment':
-          result = await this.comment(commandData);
+          result = await this.comment(data);
           break;
         case 'multi_comment':
-          result = await this.multiComment(commandData);
+          result = await this.multiComment(data);
           break;
         case 'close_tabs':
           result = await this.closeFacebookTabs();
@@ -106,33 +111,43 @@ class FacebookCommentExtension {
         default:
           result = { success: false, error: `Ação não reconhecida: ${action}` };
       }
-      
-      this.sendResult(id, result);
-      
     } catch (error) {
-      console.error('❌ Erro processando comando:', error);
-      if (message?.id) {
-        this.sendResult(message.id, { 
-          success: false, 
-          error: error.message 
-        });
+      console.error(`❌ Erro executando ${action}:`, error);
+      result = { success: false, error: error.message };
+    }
+
+    // Enviar resultado de volta para API
+    await this.sendResult(id, result);
+  }
+
+  async sendResult(commandId, result) {
+    try {
+      const response = await fetch(`${this.apiUrl}/extension/command-result`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          commandId,
+          success: result.success,
+          result: result.success ? result : undefined,
+          error: result.success ? undefined : result.error
+        })
+      });
+
+      if (response.ok) {
+        console.log(`✅ Resultado enviado: ${commandId}`);
+      } else {
+        console.error(`❌ Erro enviando resultado: ${response.status}`);
       }
+
+    } catch (error) {
+      console.error('❌ Erro enviando resultado:', error);
     }
   }
 
-  sendResult(commandId, result) {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({
-        type: 'command_result',
-        commandId,
-        success: result.success,
-        result: result.success ? result : undefined,
-        error: result.success ? undefined : result.error,
-        timestamp: Date.now()
-      }));
-    }
-  }
-
+  // ===== AÇÕES DO FACEBOOK =====
+  
   async openFacebook() {
     try {
       console.log('📘 Abrindo Facebook...');
@@ -377,20 +392,14 @@ class FacebookCommentExtension {
           facebookTabs: this.facebookTabs.size
         });
       }
-      return true; // Indica resposta assíncrona
+      return true;
     });
   }
 
   updateIcon(status) {
-    const iconPath = {
-      'connected': 'icons/icon16.png',
-      'disconnected': 'icons/icon16.png',
-      'error': 'icons/icon16.png'
-    };
-    
     try {
       chrome.action.setIcon({
-        path: iconPath[status] || 'icons/icon16.png'
+        path: 'icons/icon16.png'
       });
     } catch (error) {
       console.error('Erro atualizando ícone:', error);
@@ -400,7 +409,6 @@ class FacebookCommentExtension {
 
 // ===== FUNÇÕES PARA INJETAR NAS PÁGINAS =====
 
-// ✅ Função de login (injetada na página)
 function loginInPage(email, password) {
   return new Promise((resolve) => {
     console.log('🔑 Executando login na página...');
@@ -418,19 +426,16 @@ function loginInPage(email, password) {
           return;
         }
         
-        // Preencher email
         emailField.value = email;
         emailField.dispatchEvent(new Event('input', { bubbles: true }));
         
         await new Promise(r => setTimeout(r, 500));
         
-        // Preencher password
         passwordField.value = password;
         passwordField.dispatchEvent(new Event('input', { bubbles: true }));
         
         await new Promise(r => setTimeout(r, 1000));
         
-        // Buscar botão de login
         const loginButton = document.querySelector('button[name="login"], button[data-testid="royal_login_button"]');
         
         if (loginButton) {
@@ -440,7 +445,6 @@ function loginInPage(email, password) {
           passwordField.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
         }
         
-        // Aguardar processamento
         setTimeout(() => {
           const stillHasLoginForm = document.querySelector('input[name="email"]');
           resolve({
@@ -459,14 +463,12 @@ function loginInPage(email, password) {
   });
 }
 
-// ✅ Função de comentário (injetada na página)
 function commentInPage(text, humanMode) {
   return new Promise((resolve) => {
     console.log('💬 Executando comentário na página...');
     
     setTimeout(async () => {
       try {
-        // Buscar caixa de comentários
         const selectors = [
           'div[role="textbox"][aria-label*="comment" i]',
           'div[role="textbox"][aria-label*="comentário" i]',
@@ -495,20 +497,17 @@ function commentInPage(text, humanMode) {
           return;
         }
         
-        // Scroll e click
         commentBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
         await new Promise(r => setTimeout(r, 500));
         
         commentBox.click();
         await new Promise(r => setTimeout(r, 300));
         
-        // Limpar e escrever
         commentBox.focus();
         document.execCommand('selectAll');
         document.execCommand('delete');
         
         if (humanMode) {
-          // Escrever como humano
           for (const char of text) {
             commentBox.textContent += char;
             commentBox.dispatchEvent(new Event('input', { bubbles: true }));
@@ -521,7 +520,6 @@ function commentInPage(text, humanMode) {
         
         await new Promise(r => setTimeout(r, 500));
         
-        // Enviar
         const event = new KeyboardEvent('keydown', {
           key: 'Enter',
           code: 'Enter',
@@ -547,7 +545,6 @@ function commentInPage(text, humanMode) {
   });
 }
 
-// ✅ Função de comentários múltiplos (injetada na página)
 function multiCommentInPage(comments, interval, randomize) {
   return new Promise(async (resolve) => {
     console.log('📨 Executando comentários múltiplos...');
@@ -569,8 +566,6 @@ function multiCommentInPage(comments, interval, randomize) {
         }
         
         const comment = commentList[i];
-        
-        // ✅ Chamar função diretamente, sem window
         const commentResult = await commentInPage(comment, true);
         
         results.push({
@@ -597,6 +592,4 @@ function multiCommentInPage(comments, interval, randomize) {
 
 // ===== INICIALIZAR EXTENSÃO =====
 const extension = new FacebookCommentExtension();
-
-// ✅ Usar self em vez de window (para Service Workers)
 self.facebookCommentExtension = extension;
