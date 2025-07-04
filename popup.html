@@ -1,0 +1,64 @@
+// ===== POPUP.HTML =====
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 300px;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+    }
+    .status {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .connected {
+      color: #4CAF50;
+    }
+    .disconnected {
+      color: #f44336;
+    }
+    .info {
+      background: #f5f5f5;
+      padding: 10px;
+      border-radius: 5px;
+      margin-bottom: 10px;
+    }
+    .button {
+      width: 100%;
+      padding: 10px;
+      background: #4267B2;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+    .button:hover {
+      background: #365899;
+    }
+  </style>
+</head>
+<body>
+  <div class="status">
+    <h3>Facebook Comment Tool</h3>
+    <div id="connection-status">Verificando...</div>
+  </div>
+  
+  <div class="info">
+    <div>Abas do Facebook: <span id="tab-count">0</span></div>
+    <div>Servidor: <span id="server-status">Desconectado</span></div>
+  </div>
+  
+  <button class="button" onclick="openFacebook()">
+    Abrir Facebook
+  </button>
+  
+  <button class="button" onclick="checkStatus()">
+    Atualizar Status
+  </button>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
