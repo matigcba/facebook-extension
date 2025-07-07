@@ -476,30 +476,22 @@ function commentInPage(text, humanMode) {
         if (isWatchPage) {
           console.log('📺 Detectada página de Watch, buscando botón de comentar...');
           
-          // Buscar el botón "Leave a comment" o "Comment"
           const commentButton = document.querySelector('[aria-label="Leave a comment"]') ||
-                               document.querySelector('[data-ad-rendering-role="comment_button"]')?.closest('[role="button"]') ||
-                               document.querySelector('[role="button"]')?.innerText?.includes('Comment');
+                               document.querySelector('[data-ad-rendering-role="comment_button"]')?.closest('[role="button"]');
           
           if (commentButton) {
             console.log('🔘 Botón de comentar encontrado, haciendo clic...');
             commentButton.click();
-            
-            // Esperar a que se abra la vista de comentarios
             await new Promise(r => setTimeout(r, 3000));
           }
         }
         
-        // ✅ BUSCAR CAJA DE COMENTARIOS
+        // ✅ BUSCAR CAJA DE COMENTARIOS CON SELECTORES ACTUALIZADOS
         const selectors = [
-          'div[role="textbox"][aria-label*="comment" i]',
-          'div[role="textbox"][aria-label*="comentário" i]',
-          'div[role="textbox"][aria-label*="Write a comment" i]',
-          'div[role="textbox"][aria-label*="Escreva um comentário" i]',
-          'div[contenteditable="true"][aria-label*="comment" i]',
-          'div[contenteditable="true"][role="textbox"]',
-          // Selector específico para live videos
-          'div[data-editor][contenteditable="true"]'
+          '[aria-label="Write a comment…"][role="textbox"]',
+          '[aria-label="Escreva um comentário…"][role="textbox"]',
+          '[data-lexical-editor="true"][contenteditable="true"]',
+          'div[contenteditable="true"][role="textbox"]'
         ];
         
         let commentBox = null;
@@ -509,8 +501,13 @@ function commentInPage(text, humanMode) {
           for (const selector of selectors) {
             const elements = document.querySelectorAll(selector);
             for (const element of elements) {
+              // Verificar que sea visible y esté en el DOM
               const rect = element.getBoundingClientRect();
-              if (rect.width > 0 && rect.height > 0 && element.offsetParent !== null) {
+              const isVisible = rect.width > 0 && rect.height > 0 && 
+                               element.offsetParent !== null &&
+                               window.getComputedStyle(element).display !== 'none';
+              
+              if (isVisible) {
                 commentBox = element;
                 break;
               }
@@ -520,7 +517,6 @@ function commentInPage(text, humanMode) {
           
           if (commentBox) break;
           
-          // Si no encontramos, esperar un poco más
           console.log(`🔍 Intento ${attempt + 1}: Caja de comentarios no encontrada, esperando...`);
           await new Promise(r => setTimeout(r, 2000));
         }
@@ -539,53 +535,126 @@ function commentInPage(text, humanMode) {
         commentBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
         await new Promise(r => setTimeout(r, 500));
         
+        // Hacer clic y focus
         commentBox.click();
-        await new Promise(r => setTimeout(r, 300));
-        
         commentBox.focus();
+        await new Promise(r => setTimeout(r, 500));
         
-        // Limpiar contenido existente
-        commentBox.innerHTML = '';
+        // ✅ LIMPIAR CONTENIDO EXISTENTE
+        // Para Lexical editor, necesitamos borrar el contenido correctamente
+        const paragraph = commentBox.querySelector('p');
+        if (paragraph) {
+          paragraph.innerHTML = '';
+        } else {
+          commentBox.innerHTML = '';
+        }
         
-        // Escribir el comentario
+        // ✅ ESCRIBIR EL COMENTARIO
         if (humanMode) {
-          // Modo humano - escribir letra por letra
-          for (const char of text) {
-            const textNode = document.createTextNode(char);
-            commentBox.appendChild(textNode);
+          // Simular escritura humana
+          for (let i = 0; i < text.length; i++) {
+            const char = text[i];
             
-            // Disparar eventos de input
+            // Insertar carácter
+            const selection = window.getSelection();
+            const range = document.createRange();
+            
+            if (paragraph && paragraph.firstChild) {
+              range.setStart(paragraph.firstChild, i);
+              range.setEnd(paragraph.firstChild, i);
+            } else if (paragraph) {
+              range.selectNodeContents(paragraph);
+              range.collapse(false);
+            } else {
+              range.selectNodeContents(commentBox);
+              range.collapse(false);
+            }
+            
+            selection.removeAllRanges();
+            selection.addRange(range);
+            
+            document.execCommand('insertText', false, char);
+            
+            // Disparar eventos
             commentBox.dispatchEvent(new Event('input', { bubbles: true }));
-            commentBox.dispatchEvent(new Event('textInput', { bubbles: true }));
+            commentBox.dispatchEvent(new Event('beforeinput', { bubbles: true }));
             
             await new Promise(r => setTimeout(r, Math.random() * 100 + 50));
           }
         } else {
           // Modo rápido
-          commentBox.textContent = text;
+          document.execCommand('selectAll');
+          document.execCommand('insertText', false, text);
           commentBox.dispatchEvent(new Event('input', { bubbles: true }));
         }
         
-        await new Promise(r => setTimeout(r, 500));
-        
-        // Enviar el comentario
-        const event = new KeyboardEvent('keydown', {
-          key: 'Enter',
-          code: 'Enter',
-          keyCode: 13,
-          which: 13,
-          bubbles: true,
-          cancelable: true
-        });
-        
-        commentBox.dispatchEvent(event);
-        
         await new Promise(r => setTimeout(r, 1000));
         
-        resolve({
-          success: true,
-          message: 'Comentário enviado'
-        });
+        // ✅ BUSCAR Y HACER CLIC EN EL BOTÓN DE ENVIAR
+        console.log('🔍 Buscando botón de enviar...');
+        
+        // El botón puede estar en diferentes lugares
+        const submitSelectors = [
+          '[aria-label="Comment"]:not([aria-disabled="true"])',
+          '[aria-label="Comentar"]:not([aria-disabled="true"])',
+          'div[role="button"] i[style*="background-position: 0px -338px"]',
+          '#focused-state-composer-submit div[role="button"]:not([aria-disabled="true"])'
+        ];
+        
+        let submitButton = null;
+        
+        // Esperar a que el botón se habilite
+        for (let attempt = 0; attempt < 5; attempt++) {
+          for (const selector of submitSelectors) {
+            const button = document.querySelector(selector);
+            if (button) {
+              // Si es el ícono, obtener el botón padre
+              submitButton = button.closest('[role="button"]') || button;
+              break;
+            }
+          }
+          
+          if (submitButton && submitButton.getAttribute('aria-disabled') !== 'true') {
+            break;
+          }
+          
+          console.log(`⏳ Esperando que el botón se habilite... (intento ${attempt + 1})`);
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        
+        if (submitButton && submitButton.getAttribute('aria-disabled') !== 'true') {
+          console.log('✅ Botón de enviar encontrado y habilitado');
+          submitButton.click();
+          
+          await new Promise(r => setTimeout(r, 2000));
+          
+          resolve({
+            success: true,
+            message: 'Comentário enviado com sucesso'
+          });
+        } else {
+          // Si no encuentra el botón, intentar con Enter
+          console.log('⚠️ Botón no encontrado, intentando con Enter...');
+          
+          const event = new KeyboardEvent('keydown', {
+            key: 'Enter',
+            code: 'Enter',
+            keyCode: 13,
+            which: 13,
+            bubbles: true,
+            cancelable: true,
+            ctrlKey: true // Algunos sitios requieren Ctrl+Enter
+          });
+          
+          commentBox.dispatchEvent(event);
+          
+          await new Promise(r => setTimeout(r, 2000));
+          
+          resolve({
+            success: true,
+            message: 'Comentário enviado (via Enter)'
+          });
+        }
         
       } catch (error) {
         console.error('❌ Error en commentInPage:', error);
@@ -597,7 +666,6 @@ function commentInPage(text, humanMode) {
     }, 1000);
   });
 }
-
 function multiCommentInPage(comments, interval, randomize) {
   return new Promise(async (resolve) => {
     console.log('📨 Executando comentários múltiplos...');
