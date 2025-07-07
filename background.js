@@ -203,27 +203,51 @@ class FacebookCommentExtension {
 
   // ===== AÇÕES DO FACEBOOK =====
 
-  // ✅ Modificar openFacebook para soportar perfiles
   async openFacebook(data = {}) {
-    try {
-      const { profile = 'default', newWindow = false } = data;
-
-      console.log(`📘 Abrindo Facebook - Perfil: ${profile}`);
-
-      let tab;
-
+  try {
+    const { profile = 'default', newWindow = false } = data;
+    
+    console.log(`📘 Abrindo Facebook - Perfil: ${profile}`);
+    
+    let tab;
+    
+    // ✅ Verificar si ya hay una pestaña de Facebook abierta
+    const existingTabs = await chrome.tabs.query({ 
+      url: ['*://facebook.com/*', '*://*.facebook.com/*'] 
+    });
+    
+    if (existingTabs.length > 0 && !newWindow) {
+      // Usar pestaña existente
+      tab = existingTabs[0];
+      await chrome.tabs.update(tab.id, { active: true });
+      
+      // En Mac, también necesitamos enfocar la ventana
+      if (tab.windowId) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+      
+      console.log('✅ Usando pestaña existente de Facebook');
+    } else {
+      // Crear nueva pestaña o ventana
       if (newWindow || profile !== 'default') {
-        // Crear nueva ventana para perfil separado
-        const window = await chrome.windows.create({
+        // ✅ Configuración específica para Mac
+        const windowConfig = {
           url: 'https://facebook.com',
-          incognito: false,
+          type: 'normal',
+          state: 'normal',
+          focused: true,
           width: 1200,
           height: 800
-        });
-
+        };
+        
+        // En Mac, evitar incognito si da problemas
+        const window = await chrome.windows.create(windowConfig);
+        
+        // Esperar un momento para que la ventana se cree completamente
+        await new Promise(r => setTimeout(r, 500));
+        
         tab = window.tabs[0];
-
-        // Guardar información del perfil
+        
         if (profile !== 'default') {
           this.profiles.set(profile, {
             windowId: window.id,
@@ -232,41 +256,72 @@ class FacebookCommentExtension {
           });
         }
       } else {
-        // Comportamiento normal
-        tab = await chrome.tabs.create({
-          url: 'https://facebook.com',
-          active: true
-        });
+        // ✅ Crear pestaña con método más compatible
+        try {
+          tab = await chrome.tabs.create({
+            url: 'https://facebook.com',
+            active: true
+          });
+          
+          // Enfocar la ventana en Mac
+          if (tab.windowId) {
+            await chrome.windows.update(tab.windowId, { focused: true });
+          }
+        } catch (error) {
+          console.error('❌ Error creando pestaña, intentando método alternativo:', error);
+          
+          // Método alternativo para Mac
+          const window = await chrome.windows.getCurrent();
+          tab = await chrome.tabs.create({
+            url: 'https://facebook.com',
+            windowId: window.id,
+            active: true
+          });
+        }
       }
-
-      this.facebookTabs.set(tab.id, {
-        id: tab.id,
-        url: tab.url,
-        isLoggedIn: false,
-        profile: profile,
-        created: Date.now()
-      });
-
-      await this.waitForTabLoad(tab.id);
-      const isLoggedIn = await this.checkLoginStatus(tab.id);
-
-      console.log(`✅ Facebook aberto - Perfil: ${profile} - Logado: ${isLoggedIn}`);
-
-      return {
-        success: true,
-        tabId: tab.id,
-        isLoggedIn,
-        profile: profile
-      };
-
-    } catch (error) {
-      console.error('❌ Erro abrindo Facebook:', error);
-      return {
-        success: false,
-        error: error.message
-      };
     }
+    
+    // Verificar que tenemos un tab válido
+    if (!tab || !tab.id) {
+      throw new Error('No se pudo crear o encontrar la pestaña');
+    }
+    
+    this.facebookTabs.set(tab.id, {
+      id: tab.id,
+      url: tab.url || 'https://facebook.com',
+      isLoggedIn: false,
+      profile: profile,
+      created: Date.now()
+    });
+    
+    // ✅ Esperar más tiempo en Mac para carga completa
+    await this.waitForTabLoad(tab.id, 10000); // 10 segundos máximo
+    
+    // Verificar login con más intentos
+    let isLoggedIn = false;
+    for (let i = 0; i < 3; i++) {
+      isLoggedIn = await this.checkLoginStatus(tab.id);
+      if (isLoggedIn) break;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    
+    console.log(`✅ Facebook aberto - Perfil: ${profile} - Logado: ${isLoggedIn}`);
+    
+    return {
+      success: true,
+      tabId: tab.id,
+      isLoggedIn,
+      profile: profile
+    };
+    
+  } catch (error) {
+    console.error('❌ Erro abrindo Facebook:', error);
+    return {
+      success: false,
+      error: `Erro ao abrir Facebook: ${error.message}`
+    };
   }
+}
 
   async loginFacebook({ email, password }) {
     try {
@@ -407,20 +462,31 @@ class FacebookCommentExtension {
 
   // ===== FUNÇÕES AUXILIARES =====
 
-  async waitForTabLoad(tabId) {
-    return new Promise((resolve) => {
-      const checkStatus = () => {
-        chrome.tabs.get(tabId, (tab) => {
-          if (tab && tab.status === 'complete') {
-            resolve();
-          } else {
-            setTimeout(checkStatus, 500);
-          }
-        });
-      };
-      checkStatus();
-    });
-  }
+ async waitForTabLoad(tabId, maxTime = 10000) {
+  const startTime = Date.now();
+  
+  return new Promise((resolve) => {
+    const checkStatus = async () => {
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        
+        if (tab && tab.status === 'complete') {
+          resolve();
+        } else if (Date.now() - startTime > maxTime) {
+          console.log('⚠️ Timeout esperando carga de pestaña');
+          resolve(); // Resolver de todos modos
+        } else {
+          setTimeout(checkStatus, 500);
+        }
+      } catch (error) {
+        console.error('Error verificando estado de pestaña:', error);
+        resolve(); // Resolver en caso de error
+      }
+    };
+    
+    checkStatus();
+  });
+}
 
   async checkLoginStatus(tabId) {
     try {
