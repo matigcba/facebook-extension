@@ -4,33 +4,85 @@ console.log('🚀 Facebook Comment Tool - Background Script iniciado (HTTP)');
 class FacebookCommentExtension {
   constructor() {
     this.isConnected = false;
-    this.apiUrl = 'https://api.gestorfb.pt/api'; // Tu API REST
-    this.pollingInterval = 2000; // Consultar cada 2 segundos
+    this.apiUrl = 'https://api.gestorfb.pt/api';
+    this.pollingInterval = 2000;
     this.pollingTimer = null;
     this.facebookTabs = new Map();
-    
+    this.executingCommands = new Set();
+    this.profiles = new Map(); // ✅ Nuevo: gestión de perfiles
+
     this.init();
   }
 
   async init() {
     console.log('🔧 Inicializando extensão...');
     console.log(`🔗 API configurada: ${this.apiUrl}`);
-    
+
     // Iniciar polling
     this.startPolling();
-    
+
     // Configurar listeners
     this.setupTabListeners();
     this.setupMessageListeners();
-    
+
     // Verificar se já existem abas do Facebook
     await this.checkExistingFacebookTabs();
+  }
+
+  // ✅ Nueva función para crear perfil separado
+  async createNewProfile(profileName) {
+    try {
+      console.log(`🆕 Creando nuevo perfil: ${profileName}`);
+
+      // Crear ventana con perfil separado
+      const window = await chrome.windows.create({
+        url: 'https://facebook.com',
+        incognito: false,
+        width: 1200,
+        height: 800,
+        left: Math.floor(Math.random() * 200),
+        top: Math.floor(Math.random() * 200)
+      });
+
+      const tab = window.tabs[0];
+
+      // Guardar información del perfil
+      this.profiles.set(profileName, {
+        windowId: window.id,
+        tabId: tab.id,
+        name: profileName,
+        created: Date.now()
+      });
+
+      // También guardar en facebookTabs
+      this.facebookTabs.set(tab.id, {
+        id: tab.id,
+        url: tab.url,
+        isLoggedIn: false,
+        profile: profileName,
+        created: Date.now()
+      });
+
+      return {
+        success: true,
+        tabId: tab.id,
+        windowId: window.id,
+        profile: profileName
+      };
+
+    } catch (error) {
+      console.error('❌ Error creando perfil:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
   }
 
   // ===== POLLING PARA COMANDOS =====
   startPolling() {
     console.log('🔄 Iniciando polling para comandos...');
-    
+
     this.pollingTimer = setInterval(async () => {
       try {
         await this.checkForCommands();
@@ -51,7 +103,7 @@ class FacebookCommentExtension {
   async checkForCommands() {
     try {
       const response = await fetch(`${this.apiUrl}/extension/next-command`);
-      
+
       if (!response.ok) {
         if (!this.isConnected) {
           console.log('🔌 API não acessível');
@@ -69,7 +121,7 @@ class FacebookCommentExtension {
       }
 
       const data = await response.json();
-      
+
       if (data.hasCommand) {
         console.log(`📨 Comando recebido: ${data.command.action}`);
         await this.executeCommand(data.command);
@@ -91,7 +143,10 @@ class FacebookCommentExtension {
     try {
       switch (action) {
         case 'open_facebook':
-          result = await this.openFacebook();
+          result = await this.openFacebook(data);
+          break;
+        case 'create_profile':  // ✅ Nuevo caso
+          result = await this.createNewProfile(data.profile);
           break;
         case 'login_facebook':
           result = await this.loginFacebook(data);
@@ -147,34 +202,63 @@ class FacebookCommentExtension {
   }
 
   // ===== AÇÕES DO FACEBOOK =====
-  
-  async openFacebook() {
+
+  // ✅ Modificar openFacebook para soportar perfiles
+  async openFacebook(data = {}) {
     try {
-      console.log('📘 Abrindo Facebook...');
-      
-      const tab = await chrome.tabs.create({
-        url: 'https://facebook.com',
-        active: true
-      });
-      
+      const { profile = 'default', newWindow = false } = data;
+
+      console.log(`📘 Abrindo Facebook - Perfil: ${profile}`);
+
+      let tab;
+
+      if (newWindow || profile !== 'default') {
+        // Crear nueva ventana para perfil separado
+        const window = await chrome.windows.create({
+          url: 'https://facebook.com',
+          incognito: false,
+          width: 1200,
+          height: 800
+        });
+
+        tab = window.tabs[0];
+
+        // Guardar información del perfil
+        if (profile !== 'default') {
+          this.profiles.set(profile, {
+            windowId: window.id,
+            tabId: tab.id,
+            name: profile
+          });
+        }
+      } else {
+        // Comportamiento normal
+        tab = await chrome.tabs.create({
+          url: 'https://facebook.com',
+          active: true
+        });
+      }
+
       this.facebookTabs.set(tab.id, {
         id: tab.id,
         url: tab.url,
         isLoggedIn: false,
+        profile: profile,
         created: Date.now()
       });
-      
+
       await this.waitForTabLoad(tab.id);
       const isLoggedIn = await this.checkLoginStatus(tab.id);
-      
-      console.log(`✅ Facebook aberto - Logado: ${isLoggedIn}`);
-      
+
+      console.log(`✅ Facebook aberto - Perfil: ${profile} - Logado: ${isLoggedIn}`);
+
       return {
         success: true,
         tabId: tab.id,
-        isLoggedIn
+        isLoggedIn,
+        profile: profile
       };
-      
+
     } catch (error) {
       console.error('❌ Erro abrindo Facebook:', error);
       return {
@@ -187,27 +271,27 @@ class FacebookCommentExtension {
   async loginFacebook({ email, password }) {
     try {
       console.log('🔑 Fazendo login no Facebook...');
-      
+
       const facebookTab = this.getActiveFacebookTab();
       if (!facebookTab) {
         throw new Error('Nenhuma aba do Facebook encontrada');
       }
-      
+
       const result = await chrome.scripting.executeScript({
         target: { tabId: facebookTab.id },
         func: loginInPage,
         args: [email, password]
       });
-      
+
       const loginResult = result[0].result;
-      
+
       if (loginResult.success) {
         this.facebookTabs.get(facebookTab.id).isLoggedIn = true;
       }
-      
+
       console.log('✅ Login processado');
       return loginResult;
-      
+
     } catch (error) {
       console.error('❌ Erro no login:', error);
       return {
@@ -220,23 +304,23 @@ class FacebookCommentExtension {
   async navigateTo({ url }) {
     try {
       console.log(`🔗 Navegando para: ${url}`);
-      
+
       const facebookTab = this.getActiveFacebookTab();
       if (!facebookTab) {
         throw new Error('Nenhuma aba do Facebook encontrada');
       }
-      
+
       await chrome.tabs.update(facebookTab.id, { url });
       await this.waitForTabLoad(facebookTab.id);
-      
+
       const currentTab = await chrome.tabs.get(facebookTab.id);
-      
+
       return {
         success: true,
         finalUrl: currentTab.url,
         tabId: facebookTab.id
       };
-      
+
     } catch (error) {
       console.error('❌ Erro navegando:', error);
       return {
@@ -249,21 +333,21 @@ class FacebookCommentExtension {
   async comment({ text, humanMode = true }) {
     try {
       console.log(`💬 Comentando: "${text}"`);
-      
+
       const facebookTab = this.getActiveFacebookTab();
       if (!facebookTab) {
         throw new Error('Nenhuma aba do Facebook encontrada');
       }
-      
+
       const result = await chrome.scripting.executeScript({
         target: { tabId: facebookTab.id },
         func: commentInPage,
         args: [text, humanMode]
       });
-      
+
       console.log('✅ Comentário enviado');
       return result[0].result;
-      
+
     } catch (error) {
       console.error('❌ Erro comentando:', error);
       return {
@@ -276,20 +360,20 @@ class FacebookCommentExtension {
   async multiComment({ comments, interval, randomize }) {
     try {
       console.log(`📨 Enviando ${comments.length} comentários...`);
-      
+
       const facebookTab = this.getActiveFacebookTab();
       if (!facebookTab) {
         throw new Error('Nenhuma aba do Facebook encontrada');
       }
-      
+
       const result = await chrome.scripting.executeScript({
         target: { tabId: facebookTab.id },
         func: multiCommentInPage,
         args: [comments, interval, randomize]
       });
-      
+
       return result[0].result;
-      
+
     } catch (error) {
       console.error('❌ Erro nos comentários múltiplos:', error);
       return {
@@ -302,17 +386,17 @@ class FacebookCommentExtension {
   async closeFacebookTabs() {
     try {
       const tabIds = Array.from(this.facebookTabs.keys());
-      
+
       if (tabIds.length > 0) {
         await chrome.tabs.remove(tabIds);
         this.facebookTabs.clear();
       }
-      
+
       return {
         success: true,
         message: `${tabIds.length} abas fechadas`
       };
-      
+
     } catch (error) {
       return {
         success: false,
@@ -322,7 +406,7 @@ class FacebookCommentExtension {
   }
 
   // ===== FUNÇÕES AUXILIARES =====
-  
+
   async waitForTabLoad(tabId) {
     return new Promise((resolve) => {
       const checkStatus = () => {
@@ -352,16 +436,26 @@ class FacebookCommentExtension {
     }
   }
 
-  getActiveFacebookTab() {
+  // ✅ Obtener tab activa por perfil
+  getActiveFacebookTab(profile = null) {
+    if (profile) {
+      // Buscar tab específica del perfil
+      for (const [tabId, tabInfo] of this.facebookTabs.entries()) {
+        if (tabInfo.profile === profile) {
+          return tabInfo;
+        }
+      }
+    }
+    // Comportamiento por defecto
     return Array.from(this.facebookTabs.values())[0] || null;
   }
 
   async checkExistingFacebookTabs() {
     try {
-      const tabs = await chrome.tabs.query({ 
-        url: ['*://facebook.com/*', '*://*.facebook.com/*'] 
+      const tabs = await chrome.tabs.query({
+        url: ['*://facebook.com/*', '*://*.facebook.com/*']
       });
-      
+
       for (const tab of tabs) {
         this.facebookTabs.set(tab.id, {
           id: tab.id,
@@ -412,12 +506,12 @@ class FacebookCommentExtension {
 function loginInPage(email, password) {
   return new Promise((resolve) => {
     console.log('🔑 Executando login na página...');
-    
+
     setTimeout(async () => {
       try {
         const emailField = document.querySelector('input[name="email"], input[data-testid="royal_email"]');
         const passwordField = document.querySelector('input[name="pass"], input[data-testid="royal_pass"]');
-        
+
         if (!emailField || !passwordField) {
           resolve({
             success: false,
@@ -425,34 +519,34 @@ function loginInPage(email, password) {
           });
           return;
         }
-        
+
         // Llenar campos
         emailField.value = email;
         emailField.dispatchEvent(new Event('input', { bubbles: true }));
-        
+
         await new Promise(r => setTimeout(r, 500));
-        
+
         passwordField.value = password;
         passwordField.dispatchEvent(new Event('input', { bubbles: true }));
-        
+
         await new Promise(r => setTimeout(r, 1000));
-        
+
         // Hacer click en login
         const loginButton = document.querySelector('button[name="login"], button[data-testid="royal_login_button"]');
-        
+
         if (loginButton) {
           loginButton.click();
         } else {
           passwordField.focus();
           passwordField.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
         }
-        
+
         // ✅ RESPONDER INMEDIATAMENTE
         resolve({
           success: true,
           message: 'Login iniciado - verifique o status na página'
         });
-        
+
       } catch (error) {
         resolve({
           success: false,
@@ -466,26 +560,26 @@ function loginInPage(email, password) {
 function commentInPage(text, humanMode) {
   return new Promise((resolve) => {
     console.log('💬 Executando comentário na página...');
-    
+
     setTimeout(async () => {
       try {
         // ✅ PRIMERO: Verificar si estamos en la página de Watch
         const currentUrl = window.location.href;
         const isWatchPage = currentUrl.includes('/watch/');
-        
+
         if (isWatchPage) {
           console.log('📺 Detectada página de Watch, buscando botón de comentar...');
-          
+
           const commentButton = document.querySelector('[aria-label="Leave a comment"]') ||
-                               document.querySelector('[data-ad-rendering-role="comment_button"]')?.closest('[role="button"]');
-          
+            document.querySelector('[data-ad-rendering-role="comment_button"]')?.closest('[role="button"]');
+
           if (commentButton) {
             console.log('🔘 Botón de comentar encontrado, haciendo clic...');
             commentButton.click();
             await new Promise(r => setTimeout(r, 3000));
           }
         }
-        
+
         // ✅ BUSCAR CAJA DE COMENTARIOS
         const selectors = [
           '[aria-label="Write a comment…"][role="textbox"]',
@@ -493,18 +587,18 @@ function commentInPage(text, humanMode) {
           '[data-lexical-editor="true"][contenteditable="true"]',
           'div[contenteditable="true"][role="textbox"]'
         ];
-        
+
         let commentBox = null;
-        
+
         for (let attempt = 0; attempt < 3; attempt++) {
           for (const selector of selectors) {
             const elements = document.querySelectorAll(selector);
             for (const element of elements) {
               const rect = element.getBoundingClientRect();
-              const isVisible = rect.width > 0 && rect.height > 0 && 
-                               element.offsetParent !== null &&
-                               window.getComputedStyle(element).display !== 'none';
-              
+              const isVisible = rect.width > 0 && rect.height > 0 &&
+                element.offsetParent !== null &&
+                window.getComputedStyle(element).display !== 'none';
+
               if (isVisible) {
                 commentBox = element;
                 break;
@@ -512,13 +606,13 @@ function commentInPage(text, humanMode) {
             }
             if (commentBox) break;
           }
-          
+
           if (commentBox) break;
-          
+
           console.log(`🔍 Intento ${attempt + 1}: Caja de comentarios no encontrada, esperando...`);
           await new Promise(r => setTimeout(r, 2000));
         }
-        
+
         if (!commentBox) {
           resolve({
             success: false,
@@ -526,33 +620,33 @@ function commentInPage(text, humanMode) {
           });
           return;
         }
-        
+
         console.log('✅ Caja de comentarios encontrada');
-        
+
         // Hacer scroll y focus
         commentBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
         await new Promise(r => setTimeout(r, 500));
-        
+
         // Hacer clic y focus
         commentBox.click();
         commentBox.focus();
         await new Promise(r => setTimeout(r, 500));
-        
+
         // ✅ MÉTODO SIMPLIFICADO PARA ESCRIBIR
         if (humanMode) {
           // Limpiar contenido
           commentBox.focus();
           document.execCommand('selectAll');
           document.execCommand('delete');
-          
+
           // Escribir letra por letra
           for (const char of text) {
             // Usar execCommand que es más compatible
             document.execCommand('insertText', false, char);
-            
+
             // Disparar eventos
             commentBox.dispatchEvent(new Event('input', { bubbles: true }));
-            
+
             // Pequeña pausa para simular escritura humana
             await new Promise(r => setTimeout(r, Math.random() * 100 + 50));
           }
@@ -562,21 +656,21 @@ function commentInPage(text, humanMode) {
           document.execCommand('selectAll');
           document.execCommand('delete');
           document.execCommand('insertText', false, text);
-          
+
           // Disparar eventos
           commentBox.dispatchEvent(new Event('input', { bubbles: true }));
-          commentBox.dispatchEvent(new InputEvent('input', { 
+          commentBox.dispatchEvent(new InputEvent('input', {
             bubbles: true,
             data: text,
             inputType: 'insertText'
           }));
         }
-        
+
         await new Promise(r => setTimeout(r, 1000));
-        
+
         // ✅ BUSCAR Y HACER CLIC EN EL BOTÓN DE ENVIAR
         console.log('🔍 Buscando botón de enviar...');
-        
+
         // Buscar el botón por varios selectores
         let submitButton = null;
         const submitSelectors = [
@@ -587,7 +681,7 @@ function commentInPage(text, humanMode) {
           // Selector más genérico para el botón con el ícono
           'div[role="button"]:not([aria-disabled="true"]) i.x1b0d499'
         ];
-        
+
         // Esperar a que el botón se habilite
         for (let attempt = 0; attempt < 5; attempt++) {
           for (const selector of submitSelectors) {
@@ -595,30 +689,30 @@ function commentInPage(text, humanMode) {
             if (element) {
               // Si encontramos el ícono, obtener el botón padre
               submitButton = element.closest('[role="button"]') || element;
-              
+
               // Verificar que no esté deshabilitado
               if (submitButton.getAttribute('aria-disabled') !== 'true') {
                 break;
               }
             }
           }
-          
+
           if (submitButton && submitButton.getAttribute('aria-disabled') !== 'true') {
             break;
           }
-          
+
           console.log(`⏳ Esperando botón... (intento ${attempt + 1})`);
           await new Promise(r => setTimeout(r, 1000));
         }
-        
+
         if (submitButton && submitButton.getAttribute('aria-disabled') !== 'true') {
           console.log('✅ Botón de enviar encontrado');
-          
+
           // Hacer clic en el botón
           submitButton.click();
-          
+
           await new Promise(r => setTimeout(r, 2000));
-          
+
           resolve({
             success: true,
             message: 'Comentário enviado com sucesso'
@@ -626,7 +720,7 @@ function commentInPage(text, humanMode) {
         } else {
           // Intentar con Enter si no encuentra el botón
           console.log('⚠️ Intentando con Enter...');
-          
+
           commentBox.focus();
           const event = new KeyboardEvent('keydown', {
             key: 'Enter',
@@ -636,9 +730,9 @@ function commentInPage(text, humanMode) {
             bubbles: true,
             cancelable: true
           });
-          
+
           commentBox.dispatchEvent(event);
-          
+
           // También intentar con Ctrl+Enter
           const ctrlEnterEvent = new KeyboardEvent('keydown', {
             key: 'Enter',
@@ -649,17 +743,17 @@ function commentInPage(text, humanMode) {
             cancelable: true,
             ctrlKey: true
           });
-          
+
           commentBox.dispatchEvent(ctrlEnterEvent);
-          
+
           await new Promise(r => setTimeout(r, 2000));
-          
+
           resolve({
             success: true,
             message: 'Comentário enviado (via teclado)'
           });
         }
-        
+
       } catch (error) {
         console.error('❌ Error en commentInPage:', error);
         resolve({
@@ -674,32 +768,32 @@ function commentInPage(text, humanMode) {
 function multiCommentInPage(comments, interval, randomize) {
   return new Promise(async (resolve) => {
     console.log('📨 Executando comentários múltiplos...');
-    
+
     const results = [];
     let commentList = [...comments];
-    
+
     if (randomize) {
       commentList.sort(() => Math.random() - 0.5);
     }
-    
+
     for (let i = 0; i < commentList.length; i++) {
       try {
         if (i > 0) {
-          const waitTime = randomize 
+          const waitTime = randomize
             ? (interval * 0.7 + Math.random() * interval * 0.6) * 1000
             : interval * 1000;
           await new Promise(r => setTimeout(r, waitTime));
         }
-        
+
         const comment = commentList[i];
         const commentResult = await commentInPage(comment, true);
-        
+
         results.push({
           comment,
           status: commentResult.success ? 'enviado' : 'erro',
           error: commentResult.success ? undefined : commentResult.error
         });
-        
+
       } catch (error) {
         results.push({
           comment: commentList[i],
@@ -708,7 +802,7 @@ function multiCommentInPage(comments, interval, randomize) {
         });
       }
     }
-    
+
     resolve({
       success: true,
       results
