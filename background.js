@@ -426,6 +426,7 @@ function loginInPage(email, password) {
           return;
         }
         
+        // Llenar campos
         emailField.value = email;
         emailField.dispatchEvent(new Event('input', { bubbles: true }));
         
@@ -436,6 +437,7 @@ function loginInPage(email, password) {
         
         await new Promise(r => setTimeout(r, 1000));
         
+        // Hacer click en login
         const loginButton = document.querySelector('button[name="login"], button[data-testid="royal_login_button"]');
         
         if (loginButton) {
@@ -445,13 +447,11 @@ function loginInPage(email, password) {
           passwordField.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
         }
         
-        setTimeout(() => {
-          const stillHasLoginForm = document.querySelector('input[name="email"]');
-          resolve({
-            success: !stillHasLoginForm,
-            message: stillHasLoginForm ? 'Login pode ter falhado' : 'Login realizado'
-          });
-        }, 5000);
+        // ✅ RESPONDER INMEDIATAMENTE
+        resolve({
+          success: true,
+          message: 'Login iniciado - verifique o status na página'
+        });
         
       } catch (error) {
         resolve({
