@@ -1,5 +1,5 @@
-// ===== BACKGROUND.JS CON CONTROL COMPLETO POR TABS =====
-console.log('🚀 Facebook Comment Tool - Background Script iniciado (Control por Tabs)');
+// ===== BACKGROUND.JS CON CONTROL COMPLETO POR TABS Y MULTI-USUARIO =====
+console.log('🚀 Facebook Comment Tool - Background Script iniciado (Multi-Usuario)');
 
 class FacebookCommentExtension {
   constructor() {
@@ -7,26 +7,154 @@ class FacebookCommentExtension {
     this.apiUrl = 'https://api.gestorfb.pt/api';
     this.pollingInterval = 2000;
     this.pollingTimer = null;
-    this.facebookTabs = new Map(); // tabId -> tab info
+    this.facebookTabs = new Map();
     this.executingCommands = new Set();
     this.profiles = new Map();
+    
+    // Propiedades para usuario
+    this.extensionId = this.generateExtensionId();
+    this.userToken = null;
+    this.userId = null;
+    this.isRegistered = false;
     
     this.init();
   }
 
+  generateExtensionId() {
+    return `ext_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }
+
   async init() {
     console.log('🔧 Inicializando extensão...');
+    console.log(`🔗 Extension ID: ${this.extensionId}`);
     console.log(`🔗 API configurada: ${this.apiUrl}`);
-    console.log('🖥️ Sistema operativo:', navigator.platform);
     
-    this.startPolling();
+    // Intentar obtener token guardado
+    const stored = await chrome.storage.local.get(['userToken']);
+    if (stored.userToken) {
+      await this.registerWithToken(stored.userToken);
+    }
+    
     this.setupTabListeners();
     this.setupMessageListeners();
-    await this.checkExistingFacebookTabs();
+    // NO registrar tabs existentes automáticamente
+  }
+
+  async registerWithToken(token) {
+    try {
+      console.log('🔐 Registrando extensión con token...');
+      
+      // Si ya estábamos registrados con otro usuario, limpiar primero
+      if (this.isRegistered && this.userId) {
+        console.log('🔄 Cambiando de usuario, limpiando datos anteriores...');
+        
+        // Detener polling
+        if (this.pollingTimer) {
+          clearInterval(this.pollingTimer);
+          this.pollingTimer = null;
+        }
+        
+        // Limpiar tabs del usuario anterior
+        await this.cleanupUserTabs();
+      }
+      
+      const response = await fetch(`${this.apiUrl}/extension/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          token: token,
+          extensionId: this.extensionId
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const oldUserId = this.userId;
+        
+        this.userToken = token;
+        this.userId = data.userId;
+        this.isRegistered = true;
+        
+        console.log(`✅ Extensión registrada para usuario ${this.userId}`);
+        
+        // Si cambió el usuario, notificar
+        if (oldUserId && oldUserId !== this.userId) {
+          console.log(`👤 Usuario cambió de ${oldUserId} a ${this.userId}`);
+        }
+        
+        // Iniciar polling solo después de registrarse
+        this.startPolling();
+        
+        return true;
+      } else {
+        console.error('❌ Token inválido o expirado');
+        await chrome.storage.local.remove(['userToken']);
+        this.isRegistered = false;
+        this.userId = null;
+        return false;
+      }
+    } catch (error) {
+      console.error('❌ Error registrando extensión:', error);
+      this.isRegistered = false;
+      this.userId = null;
+      return false;
+    }
+  }
+
+  async cleanupUserTabs() {
+    console.log('🧹 Limpiando tabs del usuario anterior...');
+    
+    // Cerrar todas las tabs de Facebook del usuario anterior
+    const tabIds = Array.from(this.facebookTabs.keys());
+    if (tabIds.length > 0) {
+      try {
+        await chrome.tabs.remove(tabIds);
+      } catch (error) {
+        console.error('Error cerrando tabs:', error);
+      }
+    }
+    
+    // Limpiar mapas
+    this.facebookTabs.clear();
+    this.profiles.clear();
+    this.executingCommands.clear();
+  }
+
+  async unregister() {
+    console.log('🚪 Desregistrando extensión...');
+    
+    // Detener polling
+    if (this.pollingTimer) {
+      clearInterval(this.pollingTimer);
+      this.pollingTimer = null;
+    }
+    
+    // Limpiar datos
+    await this.cleanupUserTabs();
+    
+    // Limpiar storage
+    await chrome.storage.local.remove(['userToken']);
+    
+    // Resetear estado
+    this.userToken = null;
+    this.userId = null;
+    this.isRegistered = false;
+    this.isConnected = false;
+    
+    this.updateIcon('disconnected');
+    
+    console.log('✅ Extensión desregistrada');
   }
 
   // ===== POLLING Y COMANDOS =====
   startPolling() {
+    if (!this.isRegistered) {
+      console.log('⚠️ No se puede iniciar polling sin registro');
+      return;
+    }
+    
     console.log('🔄 Iniciando polling para comandos...');
     
     this.pollingTimer = setInterval(async () => {
@@ -39,8 +167,14 @@ class FacebookCommentExtension {
   }
 
   async checkForCommands() {
+    if (!this.isRegistered) return;
+    
     try {
-      const response = await fetch(`${this.apiUrl}/extension/next-command`);
+      const response = await fetch(`${this.apiUrl}/extension/next-command`, {
+        headers: {
+          'X-Extension-Id': this.extensionId
+        }
+      });
       
       if (!response.ok) {
         if (this.isConnected) {
@@ -60,7 +194,7 @@ class FacebookCommentExtension {
       const data = await response.json();
       
       if (data.hasCommand) {
-        console.log(`📨 Comando recebido: ${data.command.action}`);
+        console.log(`📨 Comando recebido: ${data.command.action} para usuário ${data.command.userId}`);
         await this.executeCommand(data.command);
       }
 
@@ -73,166 +207,165 @@ class FacebookCommentExtension {
     }
   }
 
-  // En background.js - Modificar el método executeCommand
-async executeCommand(command) {
-  const { id, action, data } = command;
-  
-  console.log(`🎯 Ejecutando comando: ${action}`, data);
-  
-  if (this.executingCommands.has(id)) {
-    console.log(`⚠️ Comando ${id} já está em execução`);
-    return;
-  }
-  
-  this.executingCommands.add(id);
-  
-  let result = { success: false, error: 'Comando não implementado' };
-
-  try {
-    switch (action) {
-      case 'open_facebook':
-        result = await this.openFacebook(data);
-        console.log(`✅ Resultado de open_facebook:`, result);
-        break;
-      case 'create_profile':
-        result = await this.createNewProfile(data.profile);
-        break;
-      case 'login_facebook':
-        result = await this.loginFacebook(data);
-        break;
-      case 'navigate_to':
-        result = await this.navigateTo(data);
-        break;
-      case 'comment':
-        result = await this.comment(data);
-        break;
-      case 'multi_comment':
-        result = await this.multiComment(data);
-        break;
-      case 'close_tabs':
-        result = await this.closeFacebookTabs();
-        break;
-      case 'close_tab':
-        result = await this.closeTab(data);
-        break;
-      case 'get_tabs_status':
-        result = await this.getTabsStatus();
-        break;
-      default:
-        result = { success: false, error: `Ação não reconhecida: ${action}` };
+  async executeCommand(command) {
+    const { id, action, data } = command;
+    
+    console.log(`🎯 Ejecutando comando: ${action}`, data);
+    
+    if (this.executingCommands.has(id)) {
+      console.log(`⚠️ Comando ${id} já está em execução`);
+      return;
     }
-  } catch (error) {
-    console.error(`❌ Erro executando ${action}:`, error);
-    result = { success: false, error: error.message };
-  }
-
-  console.log(`📤 Enviando resultado para comando ${id}:`, result);
-  await this.sendResult(id, result);
-  this.executingCommands.delete(id);
-}
-
-  // En background.js - Modificar el método sendResult
-async sendResult(commandId, result) {
-  try {
-    console.log(`📨 Preparando para enviar resultado del comando ${commandId}:`, result);
     
-    const payload = {
-      commandId,
-      success: result.success || false,
-      result: result.success ? result : undefined,
-      error: result.success ? undefined : (result.error || 'Error desconhecido')
-    };
+    this.executingCommands.add(id);
     
-    console.log(`📤 Payload a enviar:`, payload);
-    
-    const response = await fetch(`${this.apiUrl}/extension/command-result`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+    let result = { success: false, error: 'Comando não implementado' };
 
-    if (response.ok) {
-      console.log(`✅ Resultado enviado exitosamente: ${commandId}`);
-      const responseData = await response.json();
-      console.log(`📥 Respuesta del servidor:`, responseData);
-    } else {
-      console.error(`❌ Error enviando resultado - Status: ${response.status}`);
-      const errorText = await response.text();
-      console.error(`❌ Error del servidor:`, errorText);
+    try {
+      switch (action) {
+        case 'open_facebook':
+          result = await this.openFacebook(data);
+          console.log(`✅ Resultado de open_facebook:`, result);
+          break;
+        case 'create_profile':
+          result = await this.createNewProfile(data.profile);
+          break;
+        case 'login_facebook':
+          result = await this.loginFacebook(data);
+          break;
+        case 'navigate_to':
+          result = await this.navigateTo(data);
+          break;
+        case 'comment':
+          result = await this.comment(data);
+          break;
+        case 'multi_comment':
+          result = await this.multiComment(data);
+          break;
+        case 'close_tabs':
+          result = await this.closeFacebookTabs();
+          break;
+        case 'close_tab':
+          result = await this.closeTab(data);
+          break;
+        case 'get_tabs_status':
+          result = await this.getTabsStatus();
+          break;
+        default:
+          result = { success: false, error: `Ação não reconhecida: ${action}` };
+      }
+    } catch (error) {
+      console.error(`❌ Erro executando ${action}:`, error);
+      result = { success: false, error: error.message };
     }
-  } catch (error) {
-    console.error('❌ Erro enviando resultado:', error);
+
+    console.log(`📤 Enviando resultado para comando ${id}:`, result);
+    await this.sendResult(id, result);
+    this.executingCommands.delete(id);
   }
-}
+
+  async sendResult(commandId, result) {
+    if (!this.isRegistered) return;
+    
+    try {
+      console.log(`📨 Preparando para enviar resultado del comando ${commandId}:`, result);
+      
+      const payload = {
+        commandId,
+        success: result.success || false,
+        result: result.success ? result : undefined,
+        error: result.success ? undefined : (result.error || 'Error desconhecido')
+      };
+      
+      console.log(`📤 Payload a enviar:`, payload);
+      
+      const response = await fetch(`${this.apiUrl}/extension/command-result`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Extension-Id': this.extensionId
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (response.ok) {
+        console.log(`✅ Resultado enviado exitosamente: ${commandId}`);
+      } else {
+        console.error(`❌ Error enviando resultado - Status: ${response.status}`);
+      }
+    } catch (error) {
+      console.error('❌ Erro enviando resultado:', error);
+    }
+  }
 
   // ===== GESTÃO DE TABS =====
   
-  // En background.js - Reemplazar el método getTabsStatus
-async getTabsStatus() {
-  try {
-    console.log('📊 Obteniendo estado de tabs...');
-    console.log('Tabs en memoria:', this.facebookTabs.size);
-    
-    const tabs = [];
-    
-    for (const [tabId, tabInfo] of this.facebookTabs.entries()) {
-      try {
-        // Verificar si la tab todavía existe
-        const chromeTab = await chrome.tabs.get(parseInt(tabId));
-        
-        // Verificar si sigue siendo una tab de Facebook
-        if (chromeTab && chromeTab.url && chromeTab.url.includes('facebook.com')) {
-          // Verificar login status
-          const isLoggedIn = await this.checkLoginStatus(chromeTab.id);
+  async getTabsStatus() {
+    try {
+      console.log(`📊 Obteniendo estado de tabs para usuario ${this.userId}...`);
+      console.log('Tabs en memoria:', this.facebookTabs.size);
+      
+      const tabs = [];
+      
+      for (const [tabId, tabInfo] of this.facebookTabs.entries()) {
+        try {
+          // Verificar si la tab todavía existe
+          const chromeTab = await chrome.tabs.get(parseInt(tabId));
           
-          const tabData = {
-            tabId: parseInt(tabId),
-            profile: tabInfo.profile || 'default',
-            isLoggedIn: isLoggedIn,
-            url: chromeTab.url,
-            status: chromeTab.active ? 'active' : 'inactive',
-            email: tabInfo.email,
-            created: tabInfo.created,
-            lastAction: tabInfo.lastAction
-          };
-          
-          tabs.push(tabData);
-          
-          // Actualizar status de login en memoria
-          tabInfo.isLoggedIn = isLoggedIn;
-          
-          console.log(`✅ Tab ${tabId} incluida:`, tabData);
-        } else {
-          console.log(`⚠️ Tab ${tabId} no es de Facebook o no tiene URL`);
+          // Verificar si sigue siendo una tab de Facebook
+          if (chromeTab && chromeTab.url && chromeTab.url.includes('facebook.com')) {
+            // Verificar login status
+            const isLoggedIn = await this.checkLoginStatus(chromeTab.id);
+            
+            const tabData = {
+              tabId: parseInt(tabId),
+              profile: tabInfo.profile || 'default',
+              isLoggedIn: isLoggedIn,
+              url: chromeTab.url,
+              status: chromeTab.active ? 'active' : 'inactive',
+              email: tabInfo.email,
+              created: tabInfo.created,
+              lastAction: tabInfo.lastAction,
+              userId: this.userId
+            };
+            
+            tabs.push(tabData);
+            
+            // Actualizar status de login en memoria
+            tabInfo.isLoggedIn = isLoggedIn;
+            
+            console.log(`✅ Tab ${tabId} incluida:`, tabData);
+          } else {
+            console.log(`⚠️ Tab ${tabId} no es de Facebook o no tiene URL`);
+            this.facebookTabs.delete(tabId);
+          }
+        } catch (error) {
+          // Tab no existe más
+          console.log(`❌ Tab ${tabId} no existe, removiendo...`);
           this.facebookTabs.delete(tabId);
         }
-      } catch (error) {
-        // Tab no existe más
-        console.log(`❌ Tab ${tabId} no existe, removiendo...`);
-        this.facebookTabs.delete(tabId);
       }
+      
+      const result = {
+        success: true,
+        tabs: tabs,
+        userId: this.userId
+      };
+      
+      console.log('📤 Retornando estado de tabs:', result);
+      
+      return result;
+      
+    } catch (error) {
+      console.error('❌ Erro obtendo status das tabs:', error);
+      return {
+        success: false,
+        error: error.message,
+        tabs: [],
+        userId: this.userId
+      };
     }
-    
-    const result = {
-      success: true,
-      tabs: tabs
-    };
-    
-    console.log('📤 Retornando estado de tabs:', result);
-    
-    return result;
-    
-  } catch (error) {
-    console.error('❌ Erro obtendo status das tabs:', error);
-    return {
-      success: false,
-      error: error.message,
-      tabs: []
-    };
   }
-}
 
   async createNewProfile(profileName) {
     try {
@@ -263,7 +396,8 @@ async getTabsStatus() {
         url: tab.url,
         isLoggedIn: false,
         profile: profileName,
-        created: Date.now()
+        created: Date.now(),
+        userId: this.userId
       });
       
       return {
@@ -282,147 +416,147 @@ async getTabsStatus() {
     }
   }
 
- // En background.js - Reemplazar el método openFacebook
-async openFacebook(data = {}) {
-  try {
-    const { profile = 'default', newWindow = false } = data;
-    
-    console.log(`📘 Abriendo Facebook - Perfil: ${profile}`);
-    
-    let tab;
-    
-    // Verificar si ya hay una pestaña de Facebook abierta para este perfil
-    const existingTabs = await chrome.tabs.query({ 
-      url: ['*://facebook.com/*', '*://*.facebook.com/*'] 
-    });
-    
-    // Buscar tab existente con el mismo perfil
-    let existingProfileTab = null;
-    for (const existingTab of existingTabs) {
-      if (this.facebookTabs.has(existingTab.id)) {
-        const tabInfo = this.facebookTabs.get(existingTab.id);
-        if (tabInfo.profile === profile) {
-          existingProfileTab = existingTab;
-          break;
-        }
-      }
-    }
-    
-    if (existingProfileTab && !newWindow) {
-      // Usar pestaña existente del mismo perfil
-      tab = existingProfileTab;
-      await chrome.tabs.update(tab.id, { active: true });
+  async openFacebook(data = {}) {
+    try {
+      const { profile = 'default', newWindow = false } = data;
       
-      if (tab.windowId) {
-        await chrome.windows.update(tab.windowId, { focused: true });
-      }
+      console.log(`📘 Abriendo Facebook - Perfil: ${profile} - Usuario: ${this.userId}`);
       
-      console.log(`✅ Usando pestaña existente de Facebook - Perfil: ${profile}`);
-    } else {
-      // Crear nueva pestaña o ventana
-      if (newWindow || profile !== 'default') {
-        const windowConfig = {
-          url: 'https://facebook.com',
-          type: 'normal',
-          state: 'normal',
-          focused: true,
-          width: 1200,
-          height: 800
-        };
-        
-        const window = await chrome.windows.create(windowConfig);
-        await new Promise(r => setTimeout(r, 500));
-        
-        tab = window.tabs[0];
-        
-        if (profile !== 'default') {
-          this.profiles.set(profile, {
-            windowId: window.id,
-            tabId: tab.id,
-            name: profile
-          });
-        }
-      } else {
-        try {
-          tab = await chrome.tabs.create({
-            url: 'https://facebook.com',
-            active: true
-          });
-          
-          if (tab.windowId) {
-            await chrome.windows.update(tab.windowId, { focused: true });
+      let tab;
+      
+      // Verificar si ya hay una pestaña de Facebook abierta para este perfil
+      const existingTabs = await chrome.tabs.query({ 
+        url: ['*://facebook.com/*', '*://*.facebook.com/*'] 
+      });
+      
+      // Buscar tab existente con el mismo perfil
+      let existingProfileTab = null;
+      for (const existingTab of existingTabs) {
+        if (this.facebookTabs.has(existingTab.id)) {
+          const tabInfo = this.facebookTabs.get(existingTab.id);
+          if (tabInfo.profile === profile && tabInfo.userId === this.userId) {
+            existingProfileTab = existingTab;
+            break;
           }
-        } catch (error) {
-          console.error('❌ Error creando pestaña, intentando método alternativo:', error);
-          
-          const window = await chrome.windows.getCurrent();
-          tab = await chrome.tabs.create({
-            url: 'https://facebook.com',
-            windowId: window.id,
-            active: true
-          });
         }
       }
+      
+      if (existingProfileTab && !newWindow) {
+        // Usar pestaña existente del mismo perfil
+        tab = existingProfileTab;
+        await chrome.tabs.update(tab.id, { active: true });
+        
+        if (tab.windowId) {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        }
+        
+        console.log(`✅ Usando pestaña existente de Facebook - Perfil: ${profile}`);
+      } else {
+        // Crear nueva pestaña o ventana
+        if (newWindow || profile !== 'default') {
+          const windowConfig = {
+            url: 'https://facebook.com',
+            type: 'normal',
+            state: 'normal',
+            focused: true,
+            width: 1200,
+            height: 800
+          };
+          
+          const window = await chrome.windows.create(windowConfig);
+          await new Promise(r => setTimeout(r, 500));
+          
+          tab = window.tabs[0];
+          
+          if (profile !== 'default') {
+            this.profiles.set(profile, {
+              windowId: window.id,
+              tabId: tab.id,
+              name: profile
+            });
+          }
+        } else {
+          try {
+            tab = await chrome.tabs.create({
+              url: 'https://facebook.com',
+              active: true
+            });
+            
+            if (tab.windowId) {
+              await chrome.windows.update(tab.windowId, { focused: true });
+            }
+          } catch (error) {
+            console.error('❌ Error creando pestaña, intentando método alternativo:', error);
+            
+            const window = await chrome.windows.getCurrent();
+            tab = await chrome.tabs.create({
+              url: 'https://facebook.com',
+              windowId: window.id,
+              active: true
+            });
+          }
+        }
+      }
+      
+      if (!tab || !tab.id) {
+        throw new Error('No se pudo crear o encontrar la pestaña');
+      }
+      
+      // IMPORTANTE: Asegurar que el tabId es un número
+      const tabId = parseInt(tab.id);
+      
+      this.facebookTabs.set(tabId, {
+        id: tabId,
+        tabId: tabId,
+        url: tab.url || 'https://facebook.com',
+        isLoggedIn: false,
+        profile: profile,
+        created: Date.now(),
+        userId: this.userId
+      });
+      
+      console.log(`📌 Tab registrada:`, {
+        tabId: tabId,
+        profile: profile,
+        userId: this.userId,
+        totalTabs: this.facebookTabs.size
+      });
+      
+      await this.waitForTabLoad(tabId, 10000);
+      
+      const isLoggedIn = await this.checkLoginStatus(tabId);
+      
+      if (isLoggedIn) {
+        this.facebookTabs.get(tabId).isLoggedIn = true;
+      }
+      
+      console.log(`✅ Facebook aberto - Tab: ${tabId} - Perfil: ${profile} - Logado: ${isLoggedIn}`);
+      
+      this.updateIcon('connected');
+      
+      const result = {
+        success: true,
+        tabId: tabId,
+        isLoggedIn: isLoggedIn,
+        profile: profile
+      };
+      
+      console.log('🔄 Devolviendo resultado:', result);
+      
+      return result;
+      
+    } catch (error) {
+      console.error('❌ Erro abrindo Facebook:', error);
+      return {
+        success: false,
+        error: error.message
+      };
     }
-    
-    if (!tab || !tab.id) {
-      throw new Error('No se pudo crear o encontrar la pestaña');
-    }
-    
-    // IMPORTANTE: Asegurar que el tabId es un número
-    const tabId = parseInt(tab.id);
-    
-    this.facebookTabs.set(tabId, {
-      id: tabId,
-      tabId: tabId, // Añadir explícitamente
-      url: tab.url || 'https://facebook.com',
-      isLoggedIn: false,
-      profile: profile,
-      created: Date.now()
-    });
-    
-    console.log(`📌 Tab registrada:`, {
-      tabId: tabId,
-      profile: profile,
-      totalTabs: this.facebookTabs.size
-    });
-    
-    await this.waitForTabLoad(tabId, 10000);
-    
-    const isLoggedIn = await this.checkLoginStatus(tabId);
-    
-    if (isLoggedIn) {
-      this.facebookTabs.get(tabId).isLoggedIn = true;
-    }
-    
-    console.log(`✅ Facebook aberto - Tab: ${tabId} - Perfil: ${profile} - Logado: ${isLoggedIn}`);
-    
-    this.updateIcon('connected');
-    
-    // IMPORTANTE: Devolver el resultado con el tabId
-    const result = {
-      success: true,
-      tabId: tabId, // Asegurar que es número
-      isLoggedIn: isLoggedIn,
-      profile: profile
-    };
-    
-    console.log('🔄 Devolviendo resultado:', result);
-    
-    return result;
-    
-  } catch (error) {
-    console.error('❌ Erro abrindo Facebook:', error);
-    return {
-      success: false,
-      error: error.message
-    };
   }
-}
 
   async loginFacebook({ email, password, tabId }) {
     try {
-      console.log(`🔑 Login no Facebook - Tab: ${tabId}`);
+      console.log(`🔑 Login no Facebook - Tab: ${tabId} - Usuario: ${this.userId}`);
       
       if (!tabId || !this.facebookTabs.has(tabId)) {
         throw new Error('Tab não encontrada');
@@ -570,24 +704,33 @@ async openFacebook(data = {}) {
 
   async closeFacebookTabs() {
     try {
+      console.log(`🚪 Cerrando todas las tabs del usuario ${this.userId}...`);
+      
       const tabIds = Array.from(this.facebookTabs.keys());
+      const tabCount = tabIds.length;
+      
+      console.log(`📊 Tabs a cerrar: ${tabCount}`);
       
       if (tabIds.length > 0) {
         await chrome.tabs.remove(tabIds);
         this.facebookTabs.clear();
+        console.log('✅ Todas las tabs cerradas');
       }
       
       this.updateIcon('connected');
       
       return {
         success: true,
-        message: `${tabIds.length} abas fechadas`
+        message: `${tabCount} abas fechadas`,
+        count: tabCount
       };
       
     } catch (error) {
+      console.error('❌ Error cerrando tabs:', error);
       return {
         success: false,
-        error: error.message
+        error: error.message,
+        count: 0
       };
     }
   }
@@ -644,33 +787,32 @@ async openFacebook(data = {}) {
   getActiveFacebookTab(profile = null) {
     if (profile) {
       for (const [tabId, tabInfo] of this.facebookTabs.entries()) {
-        if (tabInfo.profile === profile) {
+        if (tabInfo.profile === profile && tabInfo.userId === this.userId) {
           return tabInfo;
         }
       }
     }
-    return Array.from(this.facebookTabs.values())[0] || null;
+    return Array.from(this.facebookTabs.values()).find(tab => tab.userId === this.userId) || null;
   }
 
   async checkExistingFacebookTabs() {
+    // Solo ejecutar si ya estamos registrados
+    if (!this.isRegistered) {
+      console.log('⚠️ No registrado, saltando verificación de tabs existentes');
+      return;
+    }
+    
     try {
       const tabs = await chrome.tabs.query({ 
         url: ['*://facebook.com/*', '*://*.facebook.com/*'] 
       });
       
-      for (const tab of tabs) {
-        const isLoggedIn = await this.checkLoginStatus(tab.id);
-        
-        this.facebookTabs.set(tab.id, {
-          id: tab.id,
-          url: tab.url,
-          isLoggedIn: isLoggedIn,
-          profile: 'existing',
-          created: Date.now()
-        });
+      // Solo registrar tabs si no tenemos tabs registradas
+      if (this.facebookTabs.size === 0 && tabs.length > 0) {
+        console.log(`⚠️ ${tabs.length} tabs de Facebook encontradas, pero no las registramos automáticamente`);
+        // NO registrar automáticamente las tabs existentes
       }
       
-      console.log(`📊 ${tabs.length} tabs do Facebook encontradas`);
       this.updateIcon('connected');
     } catch (error) {
       console.error('Erro verificando tabs:', error);
@@ -704,12 +846,29 @@ async openFacebook(data = {}) {
   setupMessageListeners() {
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       if (request.action === 'getStatus') {
-        const tabsArray = Array.from(this.facebookTabs.values());
+        const tabsArray = Array.from(this.facebookTabs.values())
+          .filter(tab => tab.userId === this.userId); // Solo tabs del usuario actual
+        
         sendResponse({
           connected: this.isConnected,
-          facebookTabs: this.facebookTabs.size,
+          registered: this.isRegistered,
+          userId: this.userId,
+          extensionId: this.extensionId,
+          facebookTabs: tabsArray.length,
           tabs: tabsArray
         });
+      } else if (request.action === 'setToken') {
+        // Recibir token desde el popup o content script
+        this.registerWithToken(request.token).then(success => {
+          sendResponse({ success, userId: this.userId });
+        });
+        return true; // Indica que la respuesta es asíncrona
+      } else if (request.action === 'logout') {
+        // Manejar logout
+        this.unregister().then(() => {
+          sendResponse({ success: true });
+        });
+        return true;
       }
       return true;
     });
@@ -721,13 +880,23 @@ async openFacebook(data = {}) {
         path: 'icons/icon16.png'
       });
       
-      // Mostrar número de tabs activas en el badge
+      // Mostrar número de tabs activas del usuario actual
+      const userTabs = Array.from(this.facebookTabs.values())
+        .filter(tab => tab.userId === this.userId).length;
+      
       chrome.action.setBadgeText({
-        text: this.facebookTabs.size > 0 ? this.facebookTabs.size.toString() : ''
+        text: userTabs > 0 ? userTabs.toString() : ''
       });
       
       chrome.action.setBadgeBackgroundColor({
-        color: status === 'connected' ? '#4CAF50' : '#F44336'
+        color: status === 'connected' && this.isRegistered ? '#4CAF50' : '#F44336'
+      });
+      
+      // Mostrar userId en el título
+      chrome.action.setTitle({
+        title: this.isRegistered ? 
+          `Facebook Tool - Usuario: ${this.userId}` : 
+          'Facebook Tool - No registrado'
       });
     } catch (error) {
       console.error('Erro atualizando ícone:', error);
