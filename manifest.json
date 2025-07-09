@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Facebook Comment Tool",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Ferramenta para comentários automatizados no Facebook",
   "permissions": [
     "activeTab",
@@ -14,16 +14,29 @@
     "https://*.facebook.com/*",
     "https://facebook.com/*",
     "http://*.facebook.com/*",  
-    "http://facebook.com/*"
+    "http://facebook.com/*",
+    "https://gestorfb.pt/*",
+    "https://www.gestorfb.pt/*",
+    "http://localhost:*/*",
+    "http://127.0.0.1:*/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "content_scripts": [
     {
-      "matches": ["https://*.facebook.com/*", "http://*.facebook.com/*"],
+      "matches": [
+        "https://*.facebook.com/*", 
+        "http://*.facebook.com/*",
+        "https://gestorfb.pt/*",
+        "https://www.gestorfb.pt/*",
+        "http://localhost:*/*",
+        "http://127.0.0.1:*/*"
+      ],
       "js": ["content.js"],
-      "run_at": "document_end"
+      "run_at": "document_end",
+      "all_frames": false
     }
   ],
   "action": {
@@ -34,5 +47,11 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["content.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

@@ -1,23 +1,34 @@
 // ===== CONTENT.JS - Script para páginas do Facebook =====
 console.log('📄 Facebook Comment Tool - Content Script carregado');
 
-// Escuchar el token desde la aplicación Angular
+// Responder a pings de la aplicación
+window.addEventListener('facebook-tool-ping', () => {
+  console.log('🏓 Ping recibido, enviando pong...');
+  window.dispatchEvent(new CustomEvent('facebook-tool-pong'));
+});
+
+// Notificar que el content script está listo
+window.dispatchEvent(new CustomEvent('facebook-tool-ready'));
+
 window.addEventListener('facebook-tool-token', async (event) => {
   console.log('🔐 Token recibido en content script');
-  
+  console.log('📦 Event detail:', event.detail);
+
   const { token } = event.detail;
-  
+
   if (token) {
     try {
-      // Guardar el token en chrome.storage
+      console.log('💾 Guardando token en storage...');
       await chrome.storage.local.set({ userToken: token });
-      console.log('💾 Token guardado en storage');
-      
-      // Enviar el token al background script
+      console.log('✅ Token guardado en storage');
+
+      console.log('📤 Enviando token al background script...');
       chrome.runtime.sendMessage({
         action: 'setToken',
         token: token
       }, (response) => {
+        console.log('📨 Respuesta del background:', response);
+
         if (chrome.runtime.lastError) {
           console.error('❌ Error comunicando con background:', chrome.runtime.lastError);
           window.dispatchEvent(new CustomEvent('facebook-tool-token-received', {
@@ -25,20 +36,19 @@ window.addEventListener('facebook-tool-token', async (event) => {
           }));
           return;
         }
-        
+
         if (response && response.success) {
           console.log('✅ Token registrado exitosamente');
           console.log('👤 Usuario ID:', response.userId);
-          
-          // Notificar a la página que el token fue recibido
+
           window.dispatchEvent(new CustomEvent('facebook-tool-token-received', {
-            detail: { 
+            detail: {
               success: true,
-              userId: response.userId 
+              userId: response.userId
             }
           }));
         } else {
-          console.error('❌ Error registrando token');
+          console.error('❌ Error registrando token:', response);
           window.dispatchEvent(new CustomEvent('facebook-tool-token-received', {
             detail: { success: false, error: 'Error al registrar token' }
           }));
@@ -46,21 +56,20 @@ window.addEventListener('facebook-tool-token', async (event) => {
       });
     } catch (error) {
       console.error('❌ Error guardando token:', error);
-      window.dispatchEvent(new CustomEvent('facebook-tool-token-received', {
-        detail: { success: false, error: error.message }
-      }));
     }
+  } else {
+    console.error('❌ No se recibió token en el evento');
   }
 });
 
 // Escuchar evento de logout
 window.addEventListener('facebook-tool-logout', async (event) => {
   console.log('🚪 Logout solicitado');
-  
+
   try {
     // Limpiar token del storage
     await chrome.storage.local.remove(['userToken']);
-    
+
     // Notificar al background script
     chrome.runtime.sendMessage({
       action: 'logout'
@@ -79,15 +88,24 @@ window.addEventListener('facebook-tool-logout', async (event) => {
   try {
     const stored = await chrome.storage.local.get(['userToken']);
     if (stored.userToken) {
-      console.log('🔑 Token encontrado en storage, enviando al background...');
+      console.log('🔑 Token encontrado en storage, verificando estado...');
       
-      chrome.runtime.sendMessage({
-        action: 'setToken',
-        token: stored.userToken
-      }, (response) => {
-        if (response && response.success) {
-          console.log('✅ Extensión re-autenticada automáticamente');
-          console.log('👤 Usuario ID:', response.userId);
+      // Primero verificar si ya estamos registrados
+      chrome.runtime.sendMessage({ action: 'getStatus' }, (response) => {
+        if (response && response.registered && response.userId) {
+          console.log('✅ Ya registrado como usuario:', response.userId);
+          // No re-enviar el token si ya estamos registrados
+        } else {
+          console.log('⚠️ No registrado, enviando token...');
+          chrome.runtime.sendMessage({
+            action: 'setToken',
+            token: stored.userToken
+          }, (response) => {
+            if (response && response.success) {
+              console.log('✅ Extensión registrada automáticamente');
+              console.log('👤 Usuario ID:', response.userId);
+            }
+          });
         }
       });
     } else {
@@ -138,11 +156,11 @@ function createIndicator(status = 'loading', userId = null) {
   if (indicator) {
     indicator.remove();
   }
-  
+
   indicator = document.createElement('div');
   indicator.className = 'facebook-comment-tool-indicator';
-  
-  switch(status) {
+
+  switch (status) {
     case 'authenticated':
       indicator.textContent = `🤖 Tool Ativo - User: ${userId}`;
       indicator.classList.add('authenticated');
@@ -157,7 +175,7 @@ function createIndicator(status = 'loading', userId = null) {
     default:
       indicator.textContent = '🤖 Comment Tool';
   }
-  
+
   // Click para verificar status
   indicator.addEventListener('click', async () => {
     chrome.runtime.sendMessage({ action: 'getStatus' }, (response) => {
@@ -171,7 +189,7 @@ function createIndicator(status = 'loading', userId = null) {
       }
     });
   });
-  
+
   document.body.appendChild(indicator);
 }
 
